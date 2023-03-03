@@ -36,6 +36,7 @@ def load(
     world_size: int,
     max_seq_len: int,
     max_batch_size: int,
+    wrapyfi_device_idx: int,
 ) -> LLaMA:
     start_time = time.time()
     checkpoints = sorted(Path(ckpt_dir).glob("*.pth"))
@@ -49,7 +50,7 @@ def load(
         params = json.loads(f.read())
 
     model_args: ModelArgs = ModelArgs(
-        max_seq_len=max_seq_len, max_batch_size=max_batch_size, **params
+        max_seq_len=max_seq_len, max_batch_size=max_batch_size, wrapyfi_device_idx=wrapyfi_device_idx, **params
     )
     tokenizer = Tokenizer(model_path=tokenizer_path)
     model_args.vocab_size = tokenizer.n_words
@@ -70,13 +71,14 @@ def main(
     top_p: float = 0.95,
     max_seq_len: int = 512,
     max_batch_size: int = 32,
+    wrapyfi_device_idx: int = 0,
 ):
     local_rank, world_size = setup_model_parallel()
     if local_rank > 0:
         sys.stdout = open(os.devnull, "w")
 
     generator = load(
-        ckpt_dir, tokenizer_path, local_rank, world_size, max_seq_len, max_batch_size
+        ckpt_dir, tokenizer_path, local_rank, world_size, max_seq_len, max_batch_size, wrapyfi_device_idx
     )
 
     prompts = [
