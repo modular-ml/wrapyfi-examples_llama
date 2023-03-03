@@ -17,6 +17,11 @@ from fairscale.nn.model_parallel.layers import (
 )
 
 
+from wrapyfi.connect.wrapper import MiddlewareCommunicator, DEFAULT_COMMUNICATOR
+
+DEVICE_IDX = 0
+
+
 @dataclass
 class ModelArgs:
     dim: int = 512
@@ -50,7 +55,6 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     freqs = torch.outer(t, freqs).float()  # type: ignore
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
     return freqs_cis
-
 
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     ndim = x.ndim
@@ -149,7 +153,7 @@ class Attention(nn.Module):
 
         return self.wo(output)
 
-
+    
 class FeedForward(nn.Module):
     def __init__(
         self,
@@ -175,26 +179,34 @@ class FeedForward(nn.Module):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
 
-class TransformerBlock(nn.Module):
-    def __init__(self, layer_id: int, args: ModelArgs):
-        super().__init__()
-        self.n_heads = args.n_heads
-        self.dim = args.dim
-        self.head_dim = args.dim // args.n_heads
-        self.attention = Attention(args)
-        self.feed_forward = FeedForward(
-            dim=args.dim, hidden_dim=4 * args.dim, multiple_of=args.multiple_of
-        )
-        self.layer_id = layer_id
-        self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
-        self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
+class TransformerBlock(MiddlewareCommunicator, nn.Module):
+    def __init__(self, layer_id: int, args: ModelArgs, enabled=True):
+        #super().__init__()
+        MiddlewareCommunicator.__init__(self)
+        nn.Module.__init__(self)
+        if enabled:
+            self.n_heads = args.n_heads
+            self.dim = args.dim
+            self.head_dim = args.dim // args.n_heads
+            self.attention = Attention(args)
+            self.feed_forward = FeedForward(
+                dim=args.dim, hidden_dim=4 * args.dim, multiple_of=args.multiple_of
+            )
+            self.layer_id = layer_id
+            self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
+            self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
+
+    @MiddlewareCommunicator.register("NativeObject", DEFAULT_COMMUNICATOR, "TransformerBlock", "$topic_name", should_wait=True)
+    def forward_wrapped(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor], topic_name="/llama/transformer_block_x"):
+        out = self.forward(x,start_pos,freqs_cis,mask)
+        return out,
 
     def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
         h = x + self.attention.forward(self.attention_norm(x), start_pos, freqs_cis, mask)
         out = h + self.feed_forward.forward(self.ffn_norm(h))
         return out
-
-
+    
+    
 class Transformer(nn.Module):
     def __init__(self, params: ModelArgs):
         super().__init__()
@@ -207,8 +219,31 @@ class Transformer(nn.Module):
         )
 
         self.layers = torch.nn.ModuleList()
-        for layer_id in range(params.n_layers):
-            self.layers.append(TransformerBlock(layer_id, params))
+        self.transformer_blocks = []
+
+        if DEVICE_IDX == 0:
+            print("PARAMETER N LAYERS", params.n_layers)
+            print("SWITCHING TO N/2 LAYERS")
+            params.n_layers = params.n_layers//2
+        elif DEVICE_IDX == 1:
+            pass
+        for layer_id in range(DEVICE_IDX*(params.n_layers//2 - 2), params.n_layers):
+            self.transformer_blocks.append(TransformerBlock(layer_id, params))
+            if DEVICE_IDX == 0:
+                if layer_id == params.n_layers - 1:
+                    self.transformer_blocks[-1].activate_communication(self.transformer_blocks[-1].forward_wrapped, "publish")
+                    print(self.transformer_blocks[-1]._MiddlewareCommunicator__registry)
+                else:
+                    self.transformer_blocks[-1].activate_communication(self.transformer_blocks[-1].forward_wrapped, "none")
+
+            if DEVICE_IDX == 1:
+                if layer_id == params.n_layers//2 - 2:
+                    self.transformer_blocks[-1] = TransformerBlock(layer_id, params, enabled=False)
+                    self.transformer_blocks[-1].activate_communication(self.transformer_blocks[-1].forward_wrapped, "listen")
+                else:
+                    self.transformer_blocks[-1].activate_communication(self.transformer_blocks[-1].forward_wrapped, "none")
+
+            self.layers.append(self.transformer_blocks[-1])
 
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
         self.output = ColumnParallelLinear(
@@ -218,6 +253,7 @@ class Transformer(nn.Module):
         self.freqs_cis = precompute_freqs_cis(
             self.params.dim // self.params.n_heads, self.params.max_seq_len * 2
         )
+        print("COMPLETED TRANSFORMER LOADING")
 
     @torch.inference_mode()
     def forward(self, tokens: torch.Tensor, start_pos: int):
@@ -232,7 +268,10 @@ class Transformer(nn.Module):
             mask = torch.triu(mask, diagonal=start_pos + 1).type_as(h)
 
         for layer in self.layers:
-            h = layer(h, start_pos, freqs_cis, mask)
+            h_temp = layer.forward_wrapped(h, start_pos, freqs_cis, mask)
+            if isinstance(h_temp, list):
+               h = h_temp[0]
         h = self.norm(h)
         output = self.output(h[:, -1, :])  # only compute last logits
         return output.float()
+
