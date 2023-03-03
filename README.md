@@ -1,3 +1,69 @@
+# LLaMA with Wrapyfi
+
+Wrapyfi enables distributing LLaMA (inference only) on multiple GPUs/machines, each with less than 16GB VRAM 
+
+**currently distributes on two cards only using ZeroMQ. Will support flexible distribution soon!** 
+
+**This approach has only been tested on 7B model for now, using Ubuntu 20.04 with two 1080 Tis. Testing 13B/30B models soon!**
+**UPDATE: Tested on Two 3080 Tis as well!!!**
+
+### How to?
+
+0. Replace all instances of <YOUR_IP> and <YOUR CHECKPOINT DIRECTORY> before running the scripts
+  
+1. Download LLaMA weights using the official form below and install this wrapyfi-examples_llama inside conda or virtual env:
+
+  ```
+  git clone https://github.com/modular-ml/wrapyfi-examples_llama.git
+  cd wrapyfi-examples_llama
+  pip install -r requirements.txt
+  pip install -e .
+  ```
+
+3. Install Wrapyfi with the same environment:
+
+  ```
+  git clone https://github.com/fabawi/wrapyfi.git
+  cd wrapyfi
+  pip install .[pyzmq]
+  ```
+
+4. Start the Wrapyfi ZeroMQ broker from within the Wrapyfi repo:
+
+  ```
+  cd wrapyfi/standalone 
+  python zeromq_proxy_broker.py --comm_type pubsubpoll
+  ```
+
+5. Start the first instance of the Wrapyfi-wrapped LLaMA from within this repo and env (order is important, dont start wrapyfi_device_idx=0 before wrapyfi_device_idx=1):
+
+  ```
+  CUDA_VISIBLE_DEVICES="0" OMP_NUM_THREADS=1 torchrun --nproc_per_node 1 example.py --ckpt_dir <YOUR CHECKPOINT DIRECTORY>/checkpoints/7B --tokenizer_path <YOUR CHECKPOINT DIRECTORY>/checkpoints/tokenizer.model --wrapyfi_device_idx 1
+  ```
+6. Now start the second instance (within this repo and env) :
+
+  ```
+  CUDA_VISIBLE_DEVICES="1" OMP_NUM_THREADS=1 torchrun --master_port=29503 --nproc_per_node 1 example.py --ckpt_dir <YOUR CHECKPOINT DIRECTORY>/checkpoints/7B --tokenizer_path <YOUR CHECKPOINT DIRECTORY>/checkpoints/tokenizer.model --wrapyfi_device_idx 0
+  ```
+
+7. You will now see the output on both terminals
+
+8. EXTRA: To run on different machines, the broker must be running on a specific IP in step 4. Start the ZeroMQ broker by setting the IP and provide the env variables for steps 5+6 e.g.,
+
+  ```
+  ### (replace 10.0.0.101 with <YOUR_IP> ###
+  
+  # step 4 modification 
+  python zeromq_proxy_broker.py --socket_ip 10.0.0.101 --comm_type pubsubpoll
+  
+  # step 5 modification
+  CUDA_VISIBLE_DEVICES="0" OMP_NUM_THREADS=1 WRAPYFI_ZEROMQ_SOCKET_IP='10.0.0.101' torchrun --nproc_per_node 1 example.py --ckpt_dir <YOUR CHECKPOINT DIRECTORY>/checkpoints/7B --tokenizer_path <YOUR CHECKPOINT DIRECTORY>/checkpoints/tokenizer.model --wrapyfi_device_idx 1
+  
+  # step 6 modification
+  CUDA_VISIBLE_DEVICES="1" OMP_NUM_THREADS=1 WRAPYFI_ZEROMQ_SOCKET_IP='10.0.0.101' torchrun --master_port=29503 --nproc_per_node 1 example.py --ckpt_dir <YOUR CHECKPOINT DIRECTORY>/checkpoints/7B --tokenizer_path <YOUR CHECKPOINT DIRECTORY>/checkpoints/tokenizer.model --wrapyfi_device_idx 0
+  ```
+
+
 # LLaMA 
 
 This repository is intended as a minimal, hackable and readable example to load [LLaMA](https://ai.facebook.com/blog/large-language-model-llama-meta-ai/) ([arXiv](https://arxiv.org/abs/2302.13971v1)) models and run inference.
