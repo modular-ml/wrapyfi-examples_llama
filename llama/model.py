@@ -1,5 +1,6 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the GNU General Public License version 3.
+# Modified by Fares Abawi (fares.abawi@uni-hamburg.de)
 
 from typing import Optional, Tuple
 from dataclasses import dataclass
