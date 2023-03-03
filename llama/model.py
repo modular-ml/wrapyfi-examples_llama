@@ -22,6 +22,7 @@ from wrapyfi.connect.wrapper import MiddlewareCommunicator, DEFAULT_COMMUNICATOR
 DEVICE_IDX = 0
 
 
+
 @dataclass
 class ModelArgs:
     dim: int = 512
@@ -55,6 +56,7 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     freqs = torch.outer(t, freqs).float()  # type: ignore
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
     return freqs_cis
+
 
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     ndim = x.ndim
@@ -153,7 +155,7 @@ class Attention(nn.Module):
 
         return self.wo(output)
 
-    
+
 class FeedForward(nn.Module):
     def __init__(
         self,
@@ -196,20 +198,22 @@ class TransformerBlock(MiddlewareCommunicator, nn.Module):
             self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
             self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
 
-    @MiddlewareCommunicator.register("NativeObject", DEFAULT_COMMUNICATOR, "TransformerBlock", "$topic_name", should_wait=True)
+    @MiddlewareCommunicator.register("NativeObject", DEFAULT_COMMUNICATOR, "TransformerBlock", "$topic_name", should_wait=True, listener_kwargs=dict(load_torch_device='cuda:0'))
     def forward_wrapped(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor], topic_name="/llama/transformer_block_x"):
-        out = self.forward(x,start_pos,freqs_cis,mask)
+        out = self(x,start_pos,freqs_cis,mask)
         return out,
 
     def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
         h = x + self.attention.forward(self.attention_norm(x), start_pos, freqs_cis, mask)
         out = h + self.feed_forward.forward(self.ffn_norm(h))
         return out
-    
-    
-class Transformer(nn.Module):
+
+
+class Transformer(MiddlewareCommunicator, nn.Module):
     def __init__(self, params: ModelArgs):
-        super().__init__()
+        MiddlewareCommunicator.__init__(self)
+        nn.Module.__init__(self)
+
         self.params = params
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
@@ -222,26 +226,31 @@ class Transformer(nn.Module):
         self.transformer_blocks = []
 
         if DEVICE_IDX == 0:
-            print("PARAMETER N LAYERS", params.n_layers)
-            print("SWITCHING TO N/2 LAYERS")
-            params.n_layers = params.n_layers//2
+            self.activate_communication(self.transformer_logits, "listen")
         elif DEVICE_IDX == 1:
-            pass
-        for layer_id in range(DEVICE_IDX*(params.n_layers//2 - 2), params.n_layers):
+            self.activate_communication(self.transformer_logits, "publish")
+
+        for layer_id in range(params.n_layers):
             self.transformer_blocks.append(TransformerBlock(layer_id, params))
             if DEVICE_IDX == 0:
-                if layer_id == params.n_layers - 1:
+                if layer_id >= params.n_layers//2:
+                    self.transformer_blocks[-1] = TransformerBlock(layer_id, params, enabled=False)
+                    self.transformer_blocks[-1].activate_communication(self.transformer_blocks[-1].forward_wrapped, "disable")
+                elif layer_id == params.n_layers//2 - 1:
                     self.transformer_blocks[-1].activate_communication(self.transformer_blocks[-1].forward_wrapped, "publish")
                     print(self.transformer_blocks[-1]._MiddlewareCommunicator__registry)
                 else:
-                    self.transformer_blocks[-1].activate_communication(self.transformer_blocks[-1].forward_wrapped, "none")
+                    self.transformer_blocks[-1].activate_communication(self.transformer_blocks[-1].forward_wrapped, None)
 
             if DEVICE_IDX == 1:
-                if layer_id == params.n_layers//2 - 2:
+                if layer_id < params.n_layers//2 - 1:
+                    self.transformer_blocks[-1] = TransformerBlock(layer_id, params, enabled=False)
+                    self.transformer_blocks[-1].activate_communication(self.transformer_blocks[-1].forward_wrapped, "disable")
+                elif layer_id == params.n_layers//2 - 1:
                     self.transformer_blocks[-1] = TransformerBlock(layer_id, params, enabled=False)
                     self.transformer_blocks[-1].activate_communication(self.transformer_blocks[-1].forward_wrapped, "listen")
                 else:
-                    self.transformer_blocks[-1].activate_communication(self.transformer_blocks[-1].forward_wrapped, "none")
+                    self.transformer_blocks[-1].activate_communication(self.transformer_blocks[-1].forward_wrapped, None)
 
             self.layers.append(self.transformer_blocks[-1])
 
@@ -254,6 +263,11 @@ class Transformer(nn.Module):
             self.params.dim // self.params.n_heads, self.params.max_seq_len * 2
         )
         print("COMPLETED TRANSFORMER LOADING")
+
+    @MiddlewareCommunicator.register("NativeObject", DEFAULT_COMMUNICATOR, "Transformer", "$topic_name", should_wait=True, listener_kwargs=dict(load_torch_device='cuda:0'))
+    def transformer_logits(self, x, topic_name="/llama/transformer_logits"):
+        return x,
+
 
     @torch.inference_mode()
     def forward(self, tokens: torch.Tensor, start_pos: int):
@@ -268,10 +282,14 @@ class Transformer(nn.Module):
             mask = torch.triu(mask, diagonal=start_pos + 1).type_as(h)
 
         for layer in self.layers:
-            h_temp = layer.forward_wrapped(h, start_pos, freqs_cis, mask)
-            if isinstance(h_temp, list):
-               h = h_temp[0]
-        h = self.norm(h)
-        output = self.output(h[:, -1, :])  # only compute last logits
-        return output.float()
-
+            h, = layer.forward_wrapped(h, start_pos, freqs_cis, mask)
+            if isinstance(h, list):
+               #h = h_temp[0]
+               print("RECEIVED A LIST", DEVICE_IDX)
+        if h is not None:
+            h = self.norm(h)
+            output = self.output(h[:, -1, :]).float()  # only compute last logits
+        else:
+                output = 0
+        out_token, = self.transformer_logits(output)
+        return out_token
