@@ -20,9 +20,6 @@ from fairscale.nn.model_parallel.layers import (
 
 from wrapyfi.connect.wrapper import MiddlewareCommunicator, DEFAULT_COMMUNICATOR
 
-DEVICE_IDX = 0
-
-
 
 @dataclass
 class ModelArgs:
@@ -35,6 +32,7 @@ class ModelArgs:
 
     max_batch_size: int = 32
     max_seq_len: int = 1024
+    wrapyfi_device_idx = 0
 
 
 class RMSNorm(torch.nn.Module):
@@ -226,14 +224,14 @@ class Transformer(MiddlewareCommunicator, nn.Module):
         self.layers = torch.nn.ModuleList()
         self.transformer_blocks = []
 
-        if DEVICE_IDX == 0:
+        if self.params.wrapyfi_device_idx == 0:
             self.activate_communication(self.transformer_logits, "listen")
-        elif DEVICE_IDX == 1:
+        elif self.params.wrapyfi_device_idx == 1:
             self.activate_communication(self.transformer_logits, "publish")
 
         for layer_id in range(params.n_layers):
             self.transformer_blocks.append(TransformerBlock(layer_id, params))
-            if DEVICE_IDX == 0:
+            if self.params.wrapyfi_device_idx == 0:
                 if layer_id >= params.n_layers//2:
                     self.transformer_blocks[-1] = TransformerBlock(layer_id, params, enabled=False)
                     self.transformer_blocks[-1].activate_communication(self.transformer_blocks[-1].forward_wrapped, "disable")
@@ -243,7 +241,7 @@ class Transformer(MiddlewareCommunicator, nn.Module):
                 else:
                     self.transformer_blocks[-1].activate_communication(self.transformer_blocks[-1].forward_wrapped, None)
 
-            if DEVICE_IDX == 1:
+            if self.params.wrapyfi_device_idx == 1:
                 if layer_id < params.n_layers//2 - 1:
                     self.transformer_blocks[-1] = TransformerBlock(layer_id, params, enabled=False)
                     self.transformer_blocks[-1].activate_communication(self.transformer_blocks[-1].forward_wrapped, "disable")
@@ -284,9 +282,6 @@ class Transformer(MiddlewareCommunicator, nn.Module):
 
         for layer in self.layers:
             h, = layer.forward_wrapped(h, start_pos, freqs_cis, mask)
-            if isinstance(h, list):
-               #h = h_temp[0]
-               print("RECEIVED A LIST", DEVICE_IDX)
         if h is not None:
             h = self.norm(h)
             output = self.output(h[:, -1, :]).float()  # only compute last logits
