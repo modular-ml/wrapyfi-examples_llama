@@ -32,7 +32,7 @@ class ModelArgs:
 
     max_batch_size: int = 32
     max_seq_len: int = 1024
-    wrapyfi_device_idx = 0
+    wrapyfi_device_idx: int = 0
 
 
 class RMSNorm(torch.nn.Module):
@@ -214,6 +214,7 @@ class Transformer(MiddlewareCommunicator, nn.Module):
         nn.Module.__init__(self)
 
         self.params = params
+        print("WRAPYFI_DEVICE_IDX",self.params.wrapyfi_device_idx)
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
 
