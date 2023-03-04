@@ -5,7 +5,10 @@ Wrapyfi enables distributing LLaMA (inference only) on multiple GPUs/machines, e
 **currently distributes on two cards only using ZeroMQ. Will support flexible distribution soon!** 
 
 **This approach has only been tested on 7B model for now, using Ubuntu 20.04 with two 1080 Tis. Testing 13B/33B models soon!**
-**UPDATE: Tested on Two 3080 Tis as well!!!**
+
+**UPDATE: Tested on Two 3080 Tis as well. Benchmarks coming soon!!!**
+
+**UPDATE 2: Much faster than CPU offloading approaches, and uses about 8 GB VRAM on each card with batch size: 32**
 
 ### How to?
 
