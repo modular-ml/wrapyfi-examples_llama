@@ -21,6 +21,11 @@ from fairscale.nn.model_parallel.layers import (
 from wrapyfi.connect.wrapper import MiddlewareCommunicator, DEFAULT_COMMUNICATOR
 
 
+def chunk_layers(n_layers, max_idx):
+    # Yield successive n-sized chunks from lst
+    for i in range(0, len(n_layers), max_idx):
+        yield n_layers[i:i + max_idx]
+
 @dataclass
 class ModelArgs:
     dim: int = 512
@@ -33,6 +38,7 @@ class ModelArgs:
     max_batch_size: int = 32
     max_seq_len: int = 1024
     wrapyfi_device_idx: int = 0
+    wrapyfi_total_devices: int = 2
 
 
 class RMSNorm(torch.nn.Module):
@@ -197,8 +203,8 @@ class TransformerBlock(MiddlewareCommunicator, nn.Module):
             self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
             self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
 
-    @MiddlewareCommunicator.register("NativeObject", DEFAULT_COMMUNICATOR, "TransformerBlock", "$topic_name", should_wait=True, listener_kwargs=dict(load_torch_device='cuda:0'))
-    def forward_wrapped(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor], topic_name="/llama/transformer_block_x"):
+    @MiddlewareCommunicator.register("NativeObject", DEFAULT_COMMUNICATOR, "TransformerBlock", "$topic_name", should_wait=True, listener_kwargs=dict(load_torch_device="$device"))
+    def forward_wrapped(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor], topic_name="/llama/transformer_block_x", device="cuda:0"):
         out = self(x,start_pos,freqs_cis,mask)
         return out,
 
@@ -214,7 +220,8 @@ class Transformer(MiddlewareCommunicator, nn.Module):
         nn.Module.__init__(self)
 
         self.params = params
-        print("WRAPYFI_DEVICE_IDX",self.params.wrapyfi_device_idx)
+        print("WRAPYFI_TOTAL_DEVICES",self.params.wrapyfi_total_devices)
+        print("WRAPYFI_DEVICE_INDEX",self.params.wrapyfi_device_idx)
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
 
@@ -223,36 +230,46 @@ class Transformer(MiddlewareCommunicator, nn.Module):
         )
 
         self.layers = torch.nn.ModuleList()
-        self.transformer_blocks = []
+        self.wrapyfi_layer_topics = list(range(params.n_layers))
 
-        if self.params.wrapyfi_device_idx == 0:
+        if self.params.wrapyfi_total_devices == -1:
+            self.activate_communication(self.transformer_logits, None)
+            device_layer_ranges = range(params.n_layers)
+        elif self.params.wrapyfi_device_idx < self.params.wrapyfi_total_devices - 1:
             self.activate_communication(self.transformer_logits, "listen")
-        elif self.params.wrapyfi_device_idx == 1:
+            device_layer_ranges = chunk_layers(range(params.n_layers), params.n_layers//self.params.wrapyfi_total_devices)
+            device_layer_ranges = list(device_layer_ranges)[self.params.wrapyfi_device_idx]
+        elif self.params.wrapyfi_device_idx == self.params.wrapyfi_total_devices - 1:
             self.activate_communication(self.transformer_logits, "publish")
+            device_layer_ranges = chunk_layers(range(params.n_layers), params.n_layers//self.params.wrapyfi_total_devices)
+            device_layer_ranges = list(device_layer_ranges)[self.params.wrapyfi_device_idx]
 
         for layer_id in range(params.n_layers):
-            self.transformer_blocks.append(TransformerBlock(layer_id, params))
-            if self.params.wrapyfi_device_idx == 0:
-                if layer_id >= params.n_layers//2:
-                    self.transformer_blocks[-1] = TransformerBlock(layer_id, params, enabled=False)
-                    self.transformer_blocks[-1].activate_communication(self.transformer_blocks[-1].forward_wrapped, "disable")
-                elif layer_id == params.n_layers//2 - 1:
-                    self.transformer_blocks[-1].activate_communication(self.transformer_blocks[-1].forward_wrapped, "publish")
-                    print(self.transformer_blocks[-1]._MiddlewareCommunicator__registry)
-                else:
-                    self.transformer_blocks[-1].activate_communication(self.transformer_blocks[-1].forward_wrapped, None)
+            if self.params.wrapyfi_total_devices == -1:
+                transformer_block = TransformerBlock(layer_id, params)
+                transformer_block.activate_communication(transformer_block.forward_wrapped, None)
 
-            if self.params.wrapyfi_device_idx == 1:
-                if layer_id < params.n_layers//2 - 1:
-                    self.transformer_blocks[-1] = TransformerBlock(layer_id, params, enabled=False)
-                    self.transformer_blocks[-1].activate_communication(self.transformer_blocks[-1].forward_wrapped, "disable")
-                elif layer_id == params.n_layers//2 - 1:
-                    self.transformer_blocks[-1] = TransformerBlock(layer_id, params, enabled=False)
-                    self.transformer_blocks[-1].activate_communication(self.transformer_blocks[-1].forward_wrapped, "listen")
-                else:
-                    self.transformer_blocks[-1].activate_communication(self.transformer_blocks[-1].forward_wrapped, None)
+            elif layer_id == 0 and self.params.wrapyfi_device_idx == 0:
+                transformer_block = TransformerBlock(layer_id, params)
+                transformer_block.activate_communication(transformer_block.forward_wrapped, None)
+            elif layer_id == params.n_layers - 1 and self.params.wrapyfi_device_idx == self.params.wrapyfi_total_devices - 1:
+                transformer_block = TransformerBlock(layer_id, params)
+                transformer_block.activate_communication(transformer_block.forward_wrapped, None)
+            elif layer_id == min(device_layer_ranges):
+                transformer_block = TransformerBlock(layer_id, params, enabled=False)
+                transformer_block.activate_communication(transformer_block.forward_wrapped, "listen")
+                self.wrapyfi_layer_topics[layer_id] -= 1
+            elif layer_id == max(device_layer_ranges):
+                transformer_block = TransformerBlock(layer_id, params)
+                transformer_block.activate_communication(transformer_block.forward_wrapped, "publish")
+            elif layer_id in device_layer_ranges:
+                transformer_block = TransformerBlock(layer_id, params)
+                transformer_block.activate_communication(transformer_block.forward_wrapped, None)
+            else:
+                transformer_block = TransformerBlock(layer_id, params, enabled=False)
+                transformer_block.activate_communication(transformer_block.forward_wrapped, "disable")
 
-            self.layers.append(self.transformer_blocks[-1])
+            self.layers.append(transformer_block)
 
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
         self.output = ColumnParallelLinear(
@@ -264,8 +281,8 @@ class Transformer(MiddlewareCommunicator, nn.Module):
         )
         print("COMPLETED TRANSFORMER LOADING")
 
-    @MiddlewareCommunicator.register("NativeObject", DEFAULT_COMMUNICATOR, "Transformer", "$topic_name", should_wait=True, listener_kwargs=dict(load_torch_device='cuda:0'))
-    def transformer_logits(self, x, topic_name="/llama/transformer_logits"):
+    @MiddlewareCommunicator.register("NativeObject", DEFAULT_COMMUNICATOR, "Transformer", "$topic_name", should_wait=True, listener_kwargs=dict(load_torch_device="$device"))
+    def transformer_logits(self, x, topic_name="/llama/transformer_logits", device="cuda:0"):
         return x,
 
 
@@ -281,8 +298,8 @@ class Transformer(MiddlewareCommunicator, nn.Module):
             mask = torch.full((1, 1, seqlen, seqlen), float("-inf"), device=tokens.device)
             mask = torch.triu(mask, diagonal=start_pos + 1).type_as(h)
 
-        for layer in self.layers:
-            h, = layer.forward_wrapped(h, start_pos, freqs_cis, mask)
+        for layer_id, layer in enumerate(self.layers):
+            h, = layer.forward_wrapped(h, start_pos, freqs_cis, mask, topic_name=f"/llama/transformer_block_{self.wrapyfi_layer_topics[layer_id]}")
         if h is not None:
             h = self.norm(h)
             output = self.output(h[:, -1, :]).float()  # only compute last logits
