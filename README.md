@@ -11,14 +11,14 @@ LLaMA 7B: input_sequence=1024, output_sequence=256, batch_size=32
 
 | GPU ID \| Type    | CPU Mem. \| Power | GPU Mem. | WPS |
 |-----------------|----------|----------|-----|
-| 0 \| TITAN Xp 12GB | 1.3 GB \| 79 W / 250 W | 8.8 GB    | 14  |
-| 1 \| TITAN Xp 12GB | 1.3 GB \| 79 W / 250 W | 9.1 GB   | 14  |
+| 0 \| TITAN Xp 12GB | 2.3 GB \| 114 W / 250 W | 8.8 GB    | 14  |
+| 1 \| TITAN Xp 12GB | 1.7 GB \| 103 W / 250 W | 9.1 GB   | 14  |
 
 * LLaMA 7B: 4 GPUs/ Same Machine -> 2 TITAN Xp 12 GB, 2 TITAN X 12 GB
 
 | GPU ID \| Type    | CPU Mem. \| Power| GPU Mem. | WPS |
 |-----------------|----------|----------|-----|
-| 0 \| TITAN Xp 12GB | 1.3 GB \| 79 W / 250 W | 5.6 GB | 12  |
+| 0 \| TITAN Xp 12GB | 2.4 GB \| 79 W / 250 W | 5.6 GB | 12  |
 | 1 \| TITAN Xp 12GB | 1.3 GB \| 63 W / 250 W | 5.6 GB | 12  |
 | 2 \| TITAN X 12GB | 1.3 GB \| 89 W / 250 W | 5.5 GB  | 12  |
 | 3 \| TITAN X 12GB | 1.3 GB \| 99 W / 250 W | 6.2 GB  | 12  |
