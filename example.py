@@ -37,6 +37,7 @@ def load(
     max_seq_len: int,
     max_batch_size: int,
     wrapyfi_device_idx: int,
+    wrapyfi_total_devices: int,
 ) -> LLaMA:
     start_time = time.time()
     checkpoints = sorted(Path(ckpt_dir).glob("*.pth"))
@@ -50,7 +51,7 @@ def load(
         params = json.loads(f.read())
 
     model_args: ModelArgs = ModelArgs(
-        max_seq_len=max_seq_len, max_batch_size=max_batch_size, wrapyfi_device_idx=wrapyfi_device_idx, **params
+        max_seq_len=max_seq_len, max_batch_size=max_batch_size, wrapyfi_device_idx=wrapyfi_device_idx, wrapyfi_total_devices=wrapyfi_total_devices, **params
     )
     tokenizer = Tokenizer(model_path=tokenizer_path)
     model_args.vocab_size = tokenizer.n_words
@@ -72,13 +73,14 @@ def main(
     max_seq_len: int = 512,
     max_batch_size: int = 32,
     wrapyfi_device_idx: int = 0,
+    wrapyfi_total_devices: int = 2,
 ):
     local_rank, world_size = setup_model_parallel()
     if local_rank > 0:
         sys.stdout = open(os.devnull, "w")
 
     generator = load(
-        ckpt_dir, tokenizer_path, local_rank, world_size, max_seq_len, max_batch_size, wrapyfi_device_idx
+        ckpt_dir, tokenizer_path, local_rank, world_size, max_seq_len, max_batch_size, wrapyfi_device_idx, wrapyfi_total_devices
     )
 
     prompts = [
@@ -108,13 +110,15 @@ plush girafe => girafe peluche
 
 cheese =>""",
     ]
-    results = generator.generate(
-        prompts, max_gen_len=256, temperature=temperature, top_p=top_p
-    )
 
-    for result in results:
-        print(result)
-        print("\n==================================\n")
+    while True:
+        results = generator.generate(
+            prompts, max_gen_len=256, temperature=temperature, top_p=top_p
+        )
+
+        for result in results:
+            print(result)
+            print("\n==================================\n")
 
 
 if __name__ == "__main__":
