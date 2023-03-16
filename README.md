@@ -2,6 +2,40 @@
 
 Wrapyfi enables distributing LLaMA (inference only) on multiple GPUs/machines, each with less than 16GB VRAM 
 
+## Setup
+
+### Option 1: Install within conda or python environment using pip
+
+1. Download LLaMA weights using the official form below and install this wrapyfi-examples_llama inside conda or virtual env:
+
+  ```
+  git clone https://github.com/modular-ml/wrapyfi-examples_llama.git
+  cd wrapyfi-examples_llama
+  pip install -r requirements.txt
+  pip install -e .
+  ```
+
+2. Install Wrapyfi within the same environment:
+
+  ```
+  git clone https://github.com/fabawi/wrapyfi.git
+  cd wrapyfi
+  pip install .[pyzmq]
+  ```
+
+### Option 2: Install using Docker (Nvidia-docker 2)
+  
+  1. Install a linux image of PyTorch with all LLaMA and Wrapyfi dependencies using the Dockerfile. From within this repository, run:
+  
+  ```
+  docker build --force-rm -t wrapyfi_llama .
+  ```
+  
+  2. To test it, run the command below. This opens up a terminal with all Python dependencies installed:
+
+  ```
+  docker run --gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 -it --rm wrapyfi_llama
+  ```
 
 ## Benchmarks
 
@@ -26,42 +60,6 @@ LLaMA 7B: input_sequence=1024, output_sequence=256, batch_size=32
 **UPDATE 1: More benchmarks to follow on 1080 Ti, 3080 Ti with 8 (4x4) remote**
 
 **UPDATE 2: Much faster than CPU offloading approaches, and uses about 9 GB VRAM on each card with batch size: 32**
-
-
-# Setup
-
-## Option 1: Install within conda or python environment using pip
-
-1. Download LLaMA weights using the official form below and install this wrapyfi-examples_llama inside conda or virtual env:
-
-  ```
-  git clone https://github.com/modular-ml/wrapyfi-examples_llama.git
-  cd wrapyfi-examples_llama
-  pip install -r requirements.txt
-  pip install -e .
-  ```
-
-2. Install Wrapyfi within the same environment:
-
-  ```
-  git clone https://github.com/fabawi/wrapyfi.git
-  cd wrapyfi
-  pip install .[pyzmq]
-  ```
-
-## Option 2: Install using Docker (Nvidia-docker 2)
-  
-  1. Install a linux image of PyTorch with all LLaMA and Wrapyfi dependencies using the Dockerfile. From within this repository, run:
-  
-  ```
-  docker build --force-rm -t wrapyfi_llama .
-  ```
-  
-  2. To test it, run the command below. This opens up a terminal with all Python dependencies installed:
-
-  ```
-  docker run --gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 -it --rm wrapyfi_llama
-  ```
 
 
 ## Example on running 2 GPUs with 7B:
@@ -129,6 +127,26 @@ To run the model on more machines, make sure that the number of layers (32 layer
   CUDA_VISIBLE_DEVICES="3" OMP_NUM_THREADS=1 WRAPYFI_ZEROMQ_SOCKET_IP='10.0.0.101' torchrun --master_port=29505 --nproc_per_node 1 example.py --ckpt_dir <YOUR CHECKPOINT DIRECTORY>/checkpoints/7B --tokenizer_path <YOUR_CHECKPOINT_DIRECTORY>/checkpoints/tokenizer.model --wrapyfi_device_idx 0 --wrapyfi_total_devices 4
   
   ```
+
+## Running 13B and Larger
+
+Running larger variants of LLaMA requires a few extra modifications. First off, LLaMA has all model checkpoints resharded, spliting the keys, values and querries into predefined chunks (MP = 2 for the case of 13B, meaning it expects consolidated.00.pth and consolidated.01.pth). The current solution is to reshard the files into a single checkpoint. This solution is not ideal, since you'd need a lot of RAM (about 61 GB) on loading the weights initially. I am looking into optimal ways for splitting the checkpoint such that the transformer blocks are split instead of parallel parts of the model. 
+
+For now, shard into one file (increase your swap memory if you don't have a large RAM). Note that this does not affect the GPU VRAM. I have set the model to only load the weights which are required for the specific `--wrapyfi_device_idx`. For example, if you have `--wrapyfi_total_devices 4`, then each instance would load 1/4th of the model approximately.
+
+To reshard your model, download the [reshard.py](https://gist.github.com/benob/4850a0210b01672175942203aa36d300) script into your LLaMA checkpoints directory (the parent directory containing 7B,13B,30B, and 65B). Now run the following command: 
+
+```
+mkdir 13B_resharded
+reshard.py 1 ./13B/ ./13B_resharded/
+```
+This will take a while, but once done, use the new `13B_resharded` directory when setting `--ckpt_dir`. Follow the steps for the 7B examples before.
+
+For larger models, it should theoretically be the same, I just haven't tried them out yet.
+
+
+-------------------------------------------------------------------------------------------
+
 
 # LLaMA 
 
