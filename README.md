@@ -57,7 +57,7 @@ LLaMA 7B: input_sequence=1024, output_sequence=256, batch_size=32
   docker build --force-rm -t wrapyfi_llama .
   ```
   
-  2. To test it, run the command below. This opens up a terminal, 
+  2. To test it, run the command below. This opens up a terminal with all Python dependencies installed:
 
   ```
   docker run --gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 -it --rm wrapyfi_llama
